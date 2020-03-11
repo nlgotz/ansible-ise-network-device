@@ -1,0 +1,30 @@
+---
+- name: "ISE | Add Device"
+  ise_network_device:
+    server: ise-ise-baby-01.tutone.net
+    username: vanilla
+    password: ise
+    action: create_device
+    secret: "hunter2"
+    objname: "{{ item.name }}"
+    ip: "{{ item.ipaddress }}"
+    profile_name: "{{ item.profile_name }}"
+  register: new_ise_device
+
+###
+#
+# Can add other types of tasks (DNS, IPAM reservation, Monitoring, etc)
+#
+###
+
+- name: DEBUG | Print ISE Output for {{ item.name }}
+  debug: var=new_ise_device
+
+- name: CREATE OUTPUT Hash
+  set_fact:
+    this_device: {"1_device_name":"{{item.name}}", "2_ip_address": "{{item.ipaddress}}", "3_ise": "{{new_ise_device.status}}"}
+
+- name: UPDATE ITEM | Add Networks to item
+  set_fact:
+    output: "{{ output }} + [ {{this_device}} ]"
+

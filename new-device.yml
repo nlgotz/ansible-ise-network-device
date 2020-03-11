@@ -1,0 +1,32 @@
+---
+- name: DEBUG | Print Variables
+  hosts: all
+  connection: local
+  gather_facts: no
+  tasks:
+    - debug: var=devices
+
+- name: CREATE OUTPUT | Create OUTPUT Variable
+  hosts: all
+  connection: local
+  gather_facts: no
+  tasks:
+    - set_fact:
+        output: []
+
+- name: SCRIPT | Deploy new Devices
+  hosts: all
+  connection: local
+  gather_facts: no
+  tasks:
+    - include: new-device-include.yml
+      loop: "{{ devices }}"
+
+- name: DEBUG | Print Output
+  hosts: all
+  connection: local
+  gather_facts: no
+  
+  tasks:
+    - debug: var=output
+

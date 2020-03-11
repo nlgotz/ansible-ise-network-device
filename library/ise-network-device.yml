@@ -1,0 +1,187 @@
+#!/usr/bin/python
+
+ANSIBLE_METADATA = {'metadata_version': '1.0',
+                    'status': ['preview'],
+                    'supported_by': 'community'}
+
+DOCUMENTATION = """
+---
+module: Cisco ISE
+author: "Nathan Gotz"
+short_description: Manage Network Devices with Cisco ISE via Web API
+description:
+  - Manage Cisco ISE via Web API
+"""
+
+EXAMPLES = """
+
+"""
+
+RETURN = """
+
+"""
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.urls import open_url
+import json
+
+try:
+    import requests
+    requests.packages.urllib3.disable_warnings()
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+def get_active_server(url, username, password):
+    """
+    Get the active server to create the proper requests. This assumes that the nodes are set to 
+    """
+    url = "{}/node".format(url)
+
+    method = "GET"
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    con = open_url(url, headers=headers, method=method, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+
+    results = json.loads(con.read())['SearchResult']['resources']
+
+    active_server = ""
+
+    for result in results:
+        url_node = "{}/{}".format(url, result['id'])
+        con = open_url(url_node, headers=headers, method=method, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+        node = json.loads(con.read())['Node']
+        if node['primaryPapNode'] == True:
+            active_server = node['fqdn'].lower()
+            
+    return active_server
+
+def network_device_exists(url, ip, username, password):
+    url = "{}?filter=ipaddress.EQ.{}".format(url, ip)
+    method = "GET"
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    con = open_url(url, headers=headers, method=method, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+    # Verify that we get a successful return result
+    if con.code == 200:
+        # Get the total number of results in the search. We don't really care about any of the other values, so we can safely ignore everything else
+        count = json.loads(con.read())['SearchResult']['total']
+        # If the total results is 0, no device at this IP exists. If it is any other number, it exists.
+        if count == 0:
+            return False # Does not exist
+        else:
+            return True # Exists
+
+def get_uuid(url, filter_name, value, username, password):
+    """
+    Function to get the UUID of a device by either IP or hostname
+    """
+    url = "{}?filter={}.EQ.{}".format(url, filter_name, value)
+    method = "GET"
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    con = open_url(url, headers=headers, method=method, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+    # Verify that we get a successful return result
+    id = 0
+    if con.code == 200:
+        # Get the UUID of the 1st (and only) result
+        results = json.loads(con.read())['SearchResult']['resources']
+        if len(results) > 0:
+            id = results[0]['id']
+        else:
+            id = 0
+    return id
+
+
+def main():
+    """
+    Ansible module to manage Cisco ACS operation by using REST API
+    """
+    module = AnsibleModule(
+        argument_spec=dict(
+            server=dict(required=True),
+            port=dict(required=False, default=9060),
+            ssl=dict(required=False, default=True),
+            username=dict(required=True),
+            password=dict(required=True, no_log=True),
+            action=dict(required=True, choices=[
+                "create_device", "delete_device",
+            ]),
+            objname=dict(required=False),
+            secret=dict(required=False),
+            ip=dict(required=False),
+            profile_name=dict(required=False),
+        )
+    )
+    if not HAS_REQUESTS:
+        module.fail_json(
+            msg="Library 'requests' is required. Use 'sudo pip install requests' to fix it.")
+
+    """
+    Global vars
+    """
+    server = module.params["server"]
+    port = module.params["port"]
+    ssl = module.params["ssl"]
+    username = module.params["username"]
+    password = module.params["password"]
+    action = module.params["action"]
+    objname = module.params["objname"]
+    secret = module.params["secret"]
+    ip = module.params["ip"]
+    profile_name = module.params["profile_name"]
+
+    # Determine if we should use https or http for the request url
+    protocol = "https" if ssl else "http"
+    url = "{}://{}:{}/ers/config".format(protocol, server, str(port))
+    active_server = get_active_server(url, username, password)
+    # Create the url
+    url = "{}://{}:{}/ers/config/networkdevice".format(protocol, active_server, str(port))
+
+    if action == "create_device":
+        #if network device already exists, don't create it
+        if network_device_exists(url, ip, username, password):
+            msg = "This device is already in ISE"
+            status = "Success"
+        else:
+            data = json.dumps({"NetworkDevice": {"name": objname, "tacacsSettings" : {"sharedSecret" : secret, "connectModeOptions" : "OFF"}, "profileName" : profile_name, "NetworkDeviceIPList" : [ {"ipaddress" : ip, "mask" : 32} ]}})
+            method = "POST"
+            headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+            con = open_url(url, headers=headers, method=method, data=data, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+            if con.code == 201:
+                msg = "Device {} at {} has successfully been added".format(objname, ip)
+                status = "Success"
+            else:
+                msg = "Device {} at {} has NOT been added. Please try again"
+                status = "Failure"
+    elif action == "delete_device":
+        # get networkdevice uuid by ip
+        ip_uuid = get_uuid(url, "ipaddress", ip, username, password)
+        # get networkdevice uuid by name
+        name_uuid = get_uuid(url, "name", objname, username, password)
+        # Verify that the UUID for the IP and the UUID for the Name match and aren't equal to 0 (no matching)
+        if ip_uuid == name_uuid != 0:
+            method = "DELETE"
+            headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+            url = "{}/{}".format(url, ip_uuid)
+            # delete network device
+            con = open_url(url, headers=headers, method=method, use_proxy=False, force_basic_auth=True, validate_certs=False, url_username=username, url_password=password)
+            if con.code == 204:
+                msg = "{} - {} has been deleted".format(objname, ip)
+                status = "Success"
+        else:
+            msg = "Name and IP UUID's don't match"
+            status = "Failure"
+        #If the UUID's match and are 0, the object does not exist
+        msg = "{} - {} is not in ISE".format(objname, ip)
+        status = "Success"
+    
+    # Print Results of actions
+    result_json = {
+        'msg': msg,
+        'status': status,
+    }
+
+
+    module.exit_json(**result_json)
+
+if __name__ == "__main__":
+    main()
+
